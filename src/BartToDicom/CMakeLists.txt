@@ -22,6 +22,7 @@ target_link_libraries(${PROJECT_NAME} BartIO)
 
 
 target_link_libraries(${PROJECT_NAME} Arc)
+target_link_libraries(${PROJECT_NAME} Acquisition)
 target_link_libraries(${PROJECT_NAME} Cartesian2D)
 target_link_libraries(${PROJECT_NAME} Cartesian3D)
 target_link_libraries(${PROJECT_NAME} Gradwarp)
@@ -34,7 +35,7 @@ target_link_libraries(${PROJECT_NAME} Crucial)
 target_link_libraries(${PROJECT_NAME} Dicom)
 target_link_libraries(${PROJECT_NAME} Hdf5)
 target_link_libraries(${PROJECT_NAME} Math)
-target_link_libraries(${PROJECT_NAME} System)
+target_link_libraries(${PROJECT_NAME} SystemServicesImplementation SystemServicesInterface System)
 target_link_libraries(${PROJECT_NAME} ${OX_3P_LIBS})
 target_link_libraries(${PROJECT_NAME} ${OX_OS_LIBS})
 
