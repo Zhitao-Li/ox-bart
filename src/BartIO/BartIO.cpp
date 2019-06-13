@@ -33,6 +33,7 @@
 #include <Orchestra/Common/SliceOrientation.h>
 #include <Orchestra/Common/SliceCorners.h>
 #include <Orchestra/Common/ReconTrace.h>
+#include <Orchestra/Common/ScanArchive.h>
 
 // includes for bart
 #include <assert.h>
@@ -285,6 +286,18 @@ static int ImageNumber(const int slice, const int echo, const int phase, const L
 }
 
 
+static int ImageNumber(const int slice, const int echo, const int phase, const Control::ProcessingControlPointer& processingCtrl)
+{
+    const int sliceCount = processingCtrl->Value<int>("NumSlices");
+    const int echoCount = processingCtrl->Value<int>("NumEchoes");
+
+    const int slicesPerPhase = sliceCount * echoCount;
+    const int imageNumber = phase * slicesPerPhase + slice * echoCount + echo;
+
+    return imageNumber;
+}
+
+
 /*
  * Apply ZIP and Z-transform
  */
@@ -343,6 +356,61 @@ void BartIO::BartZipAndZTransform(const long dims_zip[DIMS], _Complex float* ksp
 			}
 		}
 	}
+}
+
+
+void BartIO::BartZipAndZTransform(const long dims_zip[DIMS], _Complex float* ksp_zip, const long dims[DIMS], const _Complex float* ksp, const bool zip_forward, const Control::ProcessingControlPointer& processingCtrl)
+{
+    TracePointer trace = Trace::Instance();
+
+    //debug_print_dims(DP_INFO, DIMS, dims);
+
+    int numPhases = dims[TIME_DIM];
+    int numEchoes = dims[TE_DIM];
+    int numChannels = dims[COIL_DIM];
+
+    if (!zip_forward)
+        debug_printf(DP_WARN, "Backwards ZIP not yet implemented for BartToDicom!\n");
+
+    trace->ConsoleMsg("Running Z-Transform and Filter");
+
+#pragma omp parallel for collapse(3)
+    for (int currentPhase = 0; currentPhase < numPhases; ++currentPhase)
+    {
+
+        for (int currentEcho = 0; currentEcho < numEchoes; ++currentEcho)
+        {
+
+            for (int currentChannel = 0; currentChannel < numChannels; ++currentChannel)
+            {
+
+                Cartesian3D::ZTransformer zTransformer(*processingCtrl);
+
+                long dims3d[DIMS];
+                md_select_dims(DIMS, FFT_FLAGS, dims3d, dims);
+
+                long dims3d_zip[DIMS];
+                md_select_dims(DIMS, FFT_FLAGS, dims3d_zip, dims_zip);
+
+                long pos[DIMS];
+                md_set_dims(DIMS, pos, 0);
+
+                ComplexFloatCube acqKSpaceVol(dims[0], dims[1], dims[2]);
+                ComplexFloatCube zipKSpaceVol(dims_zip[0], dims_zip[1], dims_zip[2]);
+
+                pos[COIL_DIM] = currentChannel;
+                pos[TE_DIM] = currentEcho;
+                pos[TIME_DIM] = currentPhase;
+
+                md_copy_block(DIMS, pos, dims3d, acqKSpaceVol.data(), dims, ksp, CFL_SIZE);
+
+                // IFFT in Z direction. Data will be zipped from acquired size.
+                zTransformer.Apply(zipKSpaceVol, acqKSpaceVol);
+
+                md_copy_block(DIMS, pos, dims_zip, ksp_zip, dims3d_zip, zipKSpaceVol.data(), CFL_SIZE);
+            }
+        }
+    }
 }
 
 
@@ -504,6 +572,162 @@ void BartIO::BartToDicom(const long dims[DIMS], const std::string& fileNamePrefi
 }
 
 
+void BartIO::BartToDicom(const long dims[DIMS], const std::string& fileNamePrefix,
+                         const boost::optional<int>& seriesNumber,
+                         const boost::optional<std::string>& seriesDescription,
+                         const GEDicom::NetworkPointer& dicomNetwork,
+                         const _Complex float* ksp,
+                         const GERecon::ScanArchivePointer& archive,
+                         const _Complex float* channel_weights)
+{
+    TracePointer trace = Trace::Instance();
+
+    //debug_print_dims(DP_INFO, DIMS, dims);
+
+    // Create a ProcessingControl from the Legacy Pfile.
+    const Legacy::ConstLxDownloadDataPointer downloadData = boost::dynamic_pointer_cast<Legacy::LxDownloadData>(archive->LoadDownloadData());
+    const boost::shared_ptr<Legacy::LxControlSource> ctrlSrc = boost::make_shared<Legacy::LxControlSource>(downloadData);
+    const Control::ProcessingControlPointer processingControl = ctrlSrc->CreateOrchestraProcessingControl();
+
+    // Pull info directly out of ProcessingControl
+    const int imageXRes = processingControl->Value<int>("ImageXRes");
+    const int imageYRes = processingControl->Value<int>("ImageYRes");
+
+
+    // Create DICOM series to save images into
+    const Legacy::DicomSeries dicomSeries(downloadData);
+
+    int numAcqSlices = dims[PHS2_DIM];
+    int numPhases = dims[TIME_DIM];
+    int numEchoes = dims[TE_DIM];
+    int numChannels = dims[COIL_DIM];
+
+    FloatVector channelWeights(numChannels);
+
+
+    if (NULL != channel_weights)
+    {
+
+        std::cout << "Using channel weights from command-line" << std::endl;
+
+        for (int currentChannel = 0; currentChannel < numChannels; currentChannel++)
+            channelWeights(currentChannel) = __real__ channel_weights[currentChannel];
+    }
+    else if (processingControl->Value<int>("NumChannels") != numChannels)
+    {
+        std::cout << "Using all-ones for channel weights" << std::endl;
+
+        // data is probably coil compressed. let's ignore the Pfile's channel weights
+        for (int currentChannel = 0; currentChannel < numChannels; currentChannel++)
+            channelWeights(currentChannel) = 1.;
+    }
+    else
+    {
+        std::cout << "Using channel weights from Pfile" << std::endl;
+        channelWeights = processingControl->Value<FloatVector>("ChannelWeights");
+    }
+
+    int numZipSlices = processingControl->Value<int>("NumSlices");
+
+    bool zip_forward = true;
+
+    if (!zip_forward)
+        debug_printf(DP_WARN, "Backwards ZIP not yet implemented for BartToDicom!\n");
+
+    // check consistency of dimensions
+    assert(processingControl->Value<int>("AcquiredXRes") == dims[0]);
+    assert(processingControl->Value<int>("AcquiredYRes") == dims[1]);
+    assert(processingControl->Value<int>("AcquiredZRes") == numAcqSlices);
+    assert(numZipSlices >= numAcqSlices);
+
+
+    // apply zip in Z direction
+    long dims_zip[DIMS];
+    md_select_dims(DIMS, ~PHS2_FLAG, dims_zip, dims);
+    dims_zip[PHS2_DIM] = numZipSlices;
+
+    trace->ConsoleMsg("Running Z-Transform and Filter");
+
+    // FIXME: wasteful in memory
+    _Complex float* ksp_zip = (_Complex float*)md_alloc(DIMS, dims_zip, CFL_SIZE);
+
+    BartIO::BartZipAndZTransform(dims_zip, ksp_zip, dims, ksp, zip_forward, processingControl);
+
+
+    trace->ConsoleMsg("Writing %d slices to Dicom...", numZipSlices);
+
+#pragma omp parallel for collapse(3)
+    for(int currentSlice = 0; currentSlice < numZipSlices; ++currentSlice)
+    {
+
+        for(int currentPhase = 0; currentPhase < numPhases; ++currentPhase)
+        {
+
+            for(int currentEcho = 0; currentEcho < numEchoes; ++currentEcho)
+            {
+
+                // initialize these here for OMP parallel threads
+
+                // Storage for transformed image data, thus the image sizes.
+                ComplexFloatMatrix imageData(imageXRes, imageYRes);
+
+                Cartesian2D::KSpaceTransformer transformer(*processingControl);
+
+                // Create channel combiner object that will do the channel combining work in channel loop.
+                SumOfSquares channelCombiner(channelWeights);
+
+                // Gradwarp Plugin
+                GradwarpPlugin gradwarp(*processingControl, TwoDGradwarp, XRMBGradient);
+
+                long dims0[DIMS];
+                md_select_dims(DIMS, READ_FLAG | PHS1_FLAG, dims0, dims_zip);
+
+                long pos[DIMS];
+                md_set_dims(DIMS, pos, 0);
+
+                // Zero out channel combiner buffer for the next set of channels.
+                channelCombiner.Reset();
+
+                for(int currentChannel = 0; currentChannel < numChannels; ++currentChannel)
+                {
+                    //trace->ConsoleMsg("Processing Slice[%d of %d], Echo[%d of %d], Channel[%d of %d]", currentSlice+1, numZipSlices, currentEcho+1, numEchoes, currentChannel+1, numChannels);
+
+                    // extract single slice of k-space
+                    ComplexFloatMatrix kSpace0(dims_zip[0], dims_zip[1]);
+
+                    pos[PHS2_DIM] = currentSlice;
+                    pos[COIL_DIM] = currentChannel;
+                    pos[TE_DIM] = currentEcho;
+                    pos[TIME_DIM] = currentPhase;
+
+                    md_copy_block(DIMS, pos, dims0, kSpace0.data(), dims_zip, ksp_zip, CFL_SIZE);
+
+                    // Transform to image space. Data will be zipped from acquired size.
+                    transformer.Apply(imageData, kSpace0);
+
+                    // Accumulate Channel data in channel combiner.
+                    channelCombiner.Accumulate(imageData, currentChannel);
+
+                    //debug_printf(DP_INFO, "slice %d\n", currentSlice);
+                }
+
+                ComplexFloatMatrix combinedImage = channelCombiner.GetCombinedImage();
+
+                FloatMatrix magnitudeImage(combinedImage.shape());
+                MDArray::ComplexToReal(magnitudeImage, combinedImage, MDArray::MagnitudeData);
+
+                BartIO::OxImageToDicom(magnitudeImage, currentSlice, currentEcho, currentPhase, fileNamePrefix, seriesNumber, seriesDescription, dicomSeries, dicomNetwork, processingControl, gradwarp);
+
+            }
+        }
+    }
+
+    md_free(ksp_zip);
+
+    trace->ConsoleMsg("...done!");
+}
+
+
 /*
  * Write Ox Image dicoms using Pfile for auxiliary info
  */
@@ -538,4 +762,49 @@ void BartIO::OxImageToDicom(MDArray::FloatMatrix& magnitudeImage, const int curr
 	strm << fileNamePrefix << imageNumber << ".dcm";
 	dicom->Save(strm.str());
 	dicom->Store(dicomNetwork);
+}
+
+
+void BartIO::OxImageToDicom(MDArray::FloatMatrix& magnitudeImage,
+                            const int currentSlice, const int currentEcho, const int currentPhase,
+                            const std::string& fileNamePrefix,
+                            const boost::optional<int>& seriesNumber,
+                            const boost::optional<std::string>& seriesDescription,
+                            const Legacy::DicomSeries& dicomSeries,
+                            const GEDicom::NetworkPointer& dicomNetwork,
+                            const Control::ProcessingControlPointer& processingCtrl,
+                            GradwarpPlugin& gradwarp)
+{
+    // Get information for current slice
+    const SliceInfoTable sliceTable = processingCtrl->ValueStrict<SliceInfoTable>("SliceTable");
+    const int geometricSliceIndex = sliceTable.GeometricSliceNumber(currentSlice);
+
+    const SliceOrientation& sliceOrientation = sliceTable.SliceOrientation(geometricSliceIndex);
+    const SliceCorners& sliceCorners = sliceTable.SliceCorners(currentSlice);
+
+    gradwarp.Run(magnitudeImage, sliceCorners, currentSlice);
+
+    FloatMatrix rotatedImage = RotateTranspose::Apply<float>(magnitudeImage, sliceOrientation.RotationType(), sliceOrientation.TransposeType());
+
+    Clipper::Apply(rotatedImage, MagnitudeImage);
+    ShortMatrix finalImage(rotatedImage.shape());
+
+    finalImage = MDArray::cast<short>(rotatedImage);
+
+    // Create DICOM image
+    const int imageNumber = ImageNumber(currentSlice, currentEcho, currentPhase, processingCtrl);
+    const ImageCorners imageCorners(sliceCorners, sliceOrientation);
+    const GEDicom::MR::ImagePointer dicom = dicomSeries.NewImage(finalImage, imageNumber, imageCorners);
+
+    // Add custom annotation if specified on command line.
+    // Note, boost::optional<> types only get inserted if set.
+    dicom->Insert<GEDicom::LongString>(0x0008, 0x103E, seriesDescription); // Series description, showed in image browser
+    dicom->Insert<GEDicom::LongString>(0x0008, 0x1090, seriesDescription); // Manufacturers model name, showed in annotation
+    dicom->Insert<GEDicom::IntegerString>(0x0020, 0x0011, seriesNumber);
+
+    // Save DICOM to file and also store it if network is active
+    std::ostringstream strm;
+    strm << fileNamePrefix << imageNumber << ".dcm";
+    dicom->Save(strm.str());
+    dicom->Store(dicomNetwork);
 }

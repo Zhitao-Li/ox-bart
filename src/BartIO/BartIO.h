@@ -20,11 +20,20 @@ namespace GEDicom
 
 namespace GERecon
 {
+    class ScanArchive;
+    typedef boost::shared_ptr<ScanArchive> ScanArchivePointer;
+
 	namespace Legacy
 	{
 		class Pfile;
 		typedef boost::shared_ptr<Pfile> PfilePointer;
 	}
+
+    namespace Control
+    {
+        class ProcessingControl;
+        typedef boost::shared_ptr<ProcessingControl> ProcessingControlPointer;
+    }
 
 
 	namespace BartIO
@@ -100,17 +109,37 @@ namespace GERecon
 		 */
 		void BartZipAndZTransform(const long dims_zip[DIMS], _Complex float* ksp_zip, const long dims[DIMS], const _Complex float* ksp, const bool zip_forward, const Legacy::PfilePointer& pfile);
 
+        void BartZipAndZTransform(const long dims_zip[DIMS], _Complex float* ksp_zip, const long dims[DIMS], const _Complex float* ksp, const bool zip_forward, const Control::ProcessingControlPointer& processingCtrl);
+
 
 		/**
 		 * Write BART file to dicoms using pfile info
 		 */
 		void BartToDicom(const long dims[DIMS], const std::string& fileNamePrefix, const boost::optional<int>& seriesNumber, const boost::optional<std::string>& seriesDescription, const GEDicom::NetworkPointer& dicomNetwork, const _Complex float* ksp, const Legacy::PfilePointer& pfile, const float pfileVersion = 0., const _Complex float* channel_weights = NULL);
 
+        void BartToDicom(const long dims[DIMS], const std::string& fileNamePrefix,
+                         const boost::optional<int>& seriesNumber,
+                         const boost::optional<std::string>& seriesDescription,
+                         const GEDicom::NetworkPointer& dicomNetwork,
+                         const _Complex float* ksp,
+                         const GERecon::ScanArchivePointer& archive,
+                         const _Complex float* channel_weights = NULL);
+
 
 /*
  * Write Ox Image dicoms using Pfile for auxiliary info
  */
 		void OxImageToDicom(MDArray::FloatMatrix& magnitudeImage, const int currentSlice, const int currentEcho, const int currentPhase, const std::string& fileNamePrefix, const boost::optional<int>& seriesNumber, const boost::optional<std::string>& seriesDescription, const Legacy::DicomSeries& dicomSeries, const GEDicom::NetworkPointer& dicomNetwork, const Legacy::PfilePointer& pfile, GradwarpPlugin& gradwarp);
+
+        void OxImageToDicom(MDArray::FloatMatrix& magnitudeImage,
+                            const int currentSlice, const int currentEcho, const int currentPhase,
+                            const std::string& fileNamePrefix,
+                            const boost::optional<int>& seriesNumber,
+                            const boost::optional<std::string>& seriesDescription,
+                            const Legacy::DicomSeries& dicomSeries,
+                            const GEDicom::NetworkPointer& dicomNetwork,
+                            const GERecon::Control::ProcessingControlPointer& processingCtrl,
+                            GradwarpPlugin& gradwarp);
 
 	}
 }

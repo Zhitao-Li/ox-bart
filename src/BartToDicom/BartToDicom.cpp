@@ -28,6 +28,7 @@
 #include <Orchestra/Core/Clipper.h>
 #include <Orchestra/Core/RotateTranspose.h>
 
+#include <Orchestra/Common/ScanArchive.h>
 #include <Orchestra/Common/ImageCorners.h>
 #include <Orchestra/Common/SliceOrientation.h>
 #include <Orchestra/Common/SliceCorners.h>
@@ -78,11 +79,20 @@ void GERecon::BartToDicom()
 
 	// Read Pfile from command line
 	const boost::filesystem::path pfilePath = CommandLine::PfilePath();
-	const Legacy::PfilePointer pfile = Legacy::Pfile::Create(pfilePath, Legacy::Pfile::AllAvailableAcquisitions, AnonymizationPolicy(AnonymizationPolicy::None));
+    const bool bIsScanArchive = ScanArchive::IsArchiveFilePath(pfilePath);
+    ScanArchivePointer scanArchive;
+    Legacy::PfilePointer pfile;
+    float pfileVersion;
+    if (bIsScanArchive)
+        scanArchive = ScanArchive::Create(pfilePath, GESystem::Archive::LoadMode);
+    else
+    {
+        pfile = Legacy::Pfile::Create(pfilePath, Legacy::Pfile::AllAvailableAcquisitions, AnonymizationPolicy(AnonymizationPolicy::None));
 
-	// get current version of Pfile
-	const Legacy::PfileReader pfileReader(pfilePath);
-	const float pfileVersion = pfileReader.CurrentRevision();
+        // get current version of Pfile
+        const Legacy::PfileReader pfileReader(pfilePath);
+        pfileVersion = pfileReader.CurrentRevision();
+    }
 
 	// Get input name
 	const boost::optional<std::string> InString = CommandLine::BartInput();
@@ -125,7 +135,10 @@ void GERecon::BartToDicom()
 		fileName = fileNamePrefix->c_str();
 
 	// write to dicom
-	BartIO::BartToDicom(dims, fileName, seriesNumber, seriesDescription, dicomNetwork, data, pfile, pfileVersion, weights);
+    if (bIsScanArchive)
+        BartIO::BartToDicom(dims, fileName, seriesNumber, seriesDescription, dicomNetwork, data, scanArchive, weights);
+    else
+        BartIO::BartToDicom(dims, fileName, seriesNumber, seriesDescription, dicomNetwork, data, pfile, pfileVersion, weights);
 
 	if (NULL != weights)
 		unmap_cfl(DIMS, cdims, weights);
