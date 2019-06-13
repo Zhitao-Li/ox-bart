@@ -14,6 +14,12 @@
 #include <Dicom/MR/Image.h>
 #include <Dicom/Network.h>
 
+#include <Orchestra/Acquisition/ControlPacket.h>
+#include <Orchestra/Acquisition/ControlTypes.h>
+#include <Orchestra/Acquisition/Core/ArchiveStorage.h>
+#include <Orchestra/Acquisition/DataTypes.h>
+#include <Orchestra/Acquisition/FrameControl.h>
+
 #include <Orchestra/Cartesian2D/KSpaceTransformer.h>
 #include <Orchestra/Cartesian3D/ZTransformer.h>
 
@@ -240,6 +246,112 @@ void BartIO::PfileToBart(const long dims[PFILE_DIMS], _Complex float* out, const
 			}
 		}
 	}
+}
+
+
+void BartIO::PfileToBart(const long dims[PFILE_DIMS], _Complex float* out, const GERecon::ScanArchivePointer& archive, const GERecon::Control::ProcessingControlPointer& processingCtrl)
+{
+    Trace trace("PfileToBart");
+
+    unsigned int N = PFILE_DIMS;
+
+//    // FIXME: check compatibility of pfile dimensions
+//    // FIXME: check phases vs passes
+
+    const int numSlices = dims[2];
+    const int numEchoes = dims[3];
+    const int numChannels = dims[4];
+#if 0
+    const int numPhases = dims[5];
+#else
+    const int numPasses = dims[5];
+#endif
+
+    ComplexFloatMatrix imageData(dims[0], dims[1]);
+
+    const Range all = Range::all();
+    const int acqXRes = dims[0];
+    const int acqYRes = dims[1];
+    const bool evenEchoFrequencyFlipZeroBased = processingCtrl->Value<bool>("EvenEchoFrequencyFlip");
+    const bool oddEchoFrequencyFlipZeroBased = processingCtrl->Value<bool>("OddEchoFrequencyFlip");
+    const SliceInfoTable sliceTable = processingCtrl->ValueStrict<SliceInfoTable>("SliceTable");
+    ComplexFloat5D kSpaceAll(acqXRes, acqYRes, numEchoes, numSlices, numChannels);
+
+    Acquisition::ArchiveStoragePointer archiveStorage =  Acquisition::ArchiveStorage::Create(archive);
+    const size_t numCtrls = archiveStorage->AvailableControlCount();
+
+    int iFrameType = 0;
+    int iViewIndex = 0;
+    int iViewValue = 0;
+    int iEchoIndex = 0;
+    int iSliceIndex = 0;
+
+    for (size_t ctrlPacketIdx = 0; ctrlPacketIdx < numCtrls; ++ctrlPacketIdx)
+    {
+        const Acquisition::FrameControlPointer ctrlPacketAndFrameData = archiveStorage->NextFrameControl();
+
+        if (ctrlPacketAndFrameData->Control().Opcode() == Acquisition::ProgrammableOpcode)
+        {
+            const Acquisition::ProgrammableControlPacket framePacket =
+                    ctrlPacketAndFrameData->Control().Packet().As<Acquisition::ProgrammableControlPacket>();
+
+            iViewValue = Acquisition::GetPacketValue(framePacket.viewNumH, framePacket.viewNumL);
+            iFrameType = iViewValue == 0 ? Acquisition::BaselineFrame : Acquisition::ImageFrame;
+
+            if (iFrameType == Acquisition::ImageFrame)
+            {
+                iViewIndex = iViewValue == 0 ? 0 : iViewValue - 1;
+                iEchoIndex = framePacket.echoNum;
+                iSliceIndex = Acquisition::GetPacketValue(framePacket.sliceNumH, framePacket.sliceNumL);
+
+                const ComplexFloatCube frameRawData = ctrlPacketAndFrameData->Data();
+
+                for (int currentChannel = 0; currentChannel < numChannels; ++currentChannel)
+                {
+                    ComplexFloatVector oneReadout = frameRawData(Range::all(), currentChannel, 0);
+
+                    if (((iEchoIndex % 2) == 0 && evenEchoFrequencyFlipZeroBased) ||
+                        ((iEchoIndex % 2) == 1 && oddEchoFrequencyFlipZeroBased))
+                        kSpaceAll(all, iViewIndex, iEchoIndex, iSliceIndex, currentChannel) = oneReadout.reverse(firstDim);
+                    else
+                        kSpaceAll(all, iViewIndex, iEchoIndex, iSliceIndex, currentChannel) = oneReadout;
+                }
+            }
+        }
+    }
+
+
+    // copy into bart format and store in out
+#pragma omp parallel for collapse(4)
+    for (int currentPass = 0; currentPass < numPasses; currentPass++) {
+
+        for (int currentSlice = 0; currentSlice < numSlices; currentSlice++) {
+
+            for (int currentEcho = 0; currentEcho < numEchoes; currentEcho++) {
+
+                for (int currentChannel = 0; currentChannel < numChannels; currentChannel++) {
+
+                    ComplexFloatMatrix kSpace;
+
+                    const ComplexFloatMatrix kSpace1 = kSpaceAll(all, all, currentEcho, currentSlice, currentChannel);
+                    kSpace.reference(kSpace1);
+
+                    long dims1[N];
+                    BartIO::BartDims(dims1, kSpace);
+                    assert(md_check_compat(N, ~(MD_BIT(0) | MD_BIT(1)), dims, dims1));
+
+                    long pos[N];
+                    md_set_dims(N, pos, 0);
+                    pos[2] = currentSlice;
+                    pos[3] = currentEcho;
+                    pos[4] = currentChannel;
+                    pos[5] = currentPass;
+
+                    md_copy_block(N, pos, dims, out, dims1, kSpace.data(), CFL_SIZE);
+                }
+            }
+        }
+    }
 }
 
 

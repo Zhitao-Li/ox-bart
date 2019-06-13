@@ -92,6 +92,9 @@ namespace GERecon
 		void PfileToBart(const long dims[PFILE_DIMS], _Complex float* out, const Legacy::PfilePointer& pfile, const float pfileVersion = 0.);
 
 
+        void PfileToBart(const long dims[PFILE_DIMS], _Complex float* out, const GERecon::ScanArchivePointer& archive, const GERecon::Control::ProcessingControlPointer& processingCtrl);
+
+
 		/**
 		 * Convert BART array to Orchestra array
 		 */

@@ -7,6 +7,7 @@
  */
 
 // orchestra includes
+#include <Orchestra/Common/ScanArchive.h>
 #include <Orchestra/Legacy/Pfile.h>
 #include <Orchestra/Legacy/PfileReader.h>
 #include <Orchestra/Legacy/SliceEntry.h>
@@ -58,11 +59,20 @@ void GERecon::BartWrite()
 	// Read Pfile from command line
 	const boost::filesystem::path pfilePath = CommandLine::PfilePath();
 
-	const Legacy::PfilePointer pfile = Legacy::Pfile::Create(pfilePath, Legacy::Pfile::AllAvailableAcquisitions, AnonymizationPolicy(AnonymizationPolicy::None));
+    float pfileVersion;
+    const bool bIsScanArchive = ScanArchive::IsArchiveFilePath(pfilePath);
+    ScanArchivePointer scanArchive;
+    Legacy::PfilePointer pfile;
+    if (bIsScanArchive)
+        scanArchive = ScanArchive::Create(pfilePath, GESystem::Archive::LoadMode);
+    else
+    {
+        pfile = Legacy::Pfile::Create(pfilePath, Legacy::Pfile::AllAvailableAcquisitions, AnonymizationPolicy(AnonymizationPolicy::None));
 
-	// get current version of Pfile
-	const Legacy::PfileReader pfileReader(pfilePath);
-	const float pfileVersion = pfileReader.CurrentRevision();
+        // get current version of Pfile
+        const Legacy::PfileReader pfileReader(pfilePath);
+        pfileVersion = pfileReader.CurrentRevision();
+    }
 
 #if 0
 	const Legacy::LxDownloadDataPointer lp = pfile->DownloadData();
@@ -74,21 +84,28 @@ void GERecon::BartWrite()
 #endif
 
 	// Get acquired k-space dimensions from processingControl. the pfile dimensions may be zipped
-	Control::ProcessingControlPointer processingControl;
-	if (pfile->IsZEncoded())
-		processingControl = pfile->CreateOrchestraProcessingControl();
-	else
-		processingControl = pfile->CreateOrchestraProcessingControl<Cartesian2D::LxControlSource>();
+//	Control::ProcessingControlPointer processingControl;
+//	if (pfile->IsZEncoded())
+//		processingControl = pfile->CreateOrchestraProcessingControl();
+//	else
+//		processingControl = pfile->CreateOrchestraProcessingControl<Cartesian2D::LxControlSource>();
+    const Legacy::ConstLxDownloadDataPointer downloadData = bIsScanArchive ? boost::dynamic_pointer_cast<Legacy::LxDownloadData>(scanArchive->LoadDownloadData()) : pfile->DownloadData();
+    const boost::shared_ptr<Legacy::LxControlSource> ctrlSrc = boost::make_shared<Legacy::LxControlSource>(downloadData);
+    const Control::ProcessingControlPointer processingControl = ctrlSrc->CreateOrchestraProcessingControl();
 
 	const int acqXRes = processingControl->Value<int>("AcquiredXRes");
 	const int acqYRes = processingControl->Value<int>("AcquiredYRes");
 	const int acqZRes = processingControl->Value<int>("AcquiredZRes");
 	const FloatVector channelWeights = processingControl->Value<FloatVector>("ChannelWeights");
 
-	const int numEchoes = pfile->EchoCount();
-	const int numChannels = pfile->ChannelCount();
-	const int numPhases = pfile->PhaseCount();
-	const int numPasses = pfile->PassCount();
+//	const int numEchoes = pfile->EchoCount();
+//	const int numChannels = pfile->ChannelCount();
+//	const int numPhases = pfile->PhaseCount();
+//	const int numPasses = pfile->PassCount();
+    const int numEchoes = processingControl->Value<int>("NumEchoes");
+    const int numChannels = processingControl->Value<int>("NumChannels");
+    const int numPhases = processingControl->Value<int>("NumPhases");
+    const int numPasses = processingControl->Value<int>("NumPasses");
 
 	debug_printf(DP_DEBUG1, "Pfile dims: \n");
 	debug_printf(DP_DEBUG1, "Spatial dims\t%03d %03d %03d\n", acqXRes, acqYRes, acqZRes);
@@ -107,12 +124,20 @@ void GERecon::BartWrite()
 	long dims[PFILE_DIMS];
 
 #if 1
-	// FIXME: rare occasions where data size does not match pfile/proccesing control specified size...
-	const ComplexFloatMatrix kSpace = pfile->KSpaceData<float>(Legacy::Pfile::PassSlicePair(0, 0), 0, 0);
-	long dims1[DIMS];
-	BartIO::BartDims(dims1, kSpace);
-	dims[0] = dims1[0];
-	dims[1] = dims1[1];
+    if (bIsScanArchive)
+    {
+        dims[0] = acqXRes;
+        dims[1] = acqYRes;
+    }
+    else
+    {
+        // FIXME: rare occasions where data size does not match pfile/proccesing control specified size...
+        const ComplexFloatMatrix kSpace = pfile->KSpaceData<float>(Legacy::Pfile::PassSlicePair(0, 0), 0, 0);
+        long dims1[DIMS];
+        BartIO::BartDims(dims1, kSpace);
+        dims[0] = dims1[0];
+        dims[1] = dims1[1];
+    }
 	
 	
 #else
@@ -131,7 +156,10 @@ void GERecon::BartWrite()
 	// copy into bart-formatted ksp array
 	_Complex float* ksp2 = (_Complex float*)md_alloc(PFILE_DIMS, dims, CFL_SIZE);
 
-	BartIO::PfileToBart(dims, ksp2, pfile, pfileVersion);
+    if (bIsScanArchive)
+        BartIO::PfileToBart(dims, ksp2, scanArchive, processingControl);
+    else
+        BartIO::PfileToBart(dims, ksp2, pfile, pfileVersion);
 
 	if (0 != fftmod_flags) {
 
